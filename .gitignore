@@ -1,0 +1,7 @@
+!.gitignore
+
+zig-cache/*
+*/zig-cache/*
+
+*.swp
+*.swo
