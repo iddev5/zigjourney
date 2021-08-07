@@ -1,42 +1,58 @@
 const std = @import("std");
 
-const OperatorType = enum { inc, dec, lshift, rshift, read, write, jmp, jnz };
+const OperatorType = enum { invalid, inc, dec, lshift, rshift, read, write, jmp, jnz };
 
 const Operator = struct {
     op: OperatorType,
     arg: usize,
 };
 
-fn compute_jumps(table: []u32, prog: []u8) void {
+fn compile_prog(allocator: *std.mem.Allocator, prog: []u8) !std.ArrayList(Operator) {
     var pc: u32 = 0;
+    var ops = std.ArrayList(Operator).init(allocator);
+    var loop_stack = std.ArrayList(usize).init(allocator);
 
     while (pc < prog.len) {
         if (prog[pc] == '[') {
-            var bracket_nesting: usize = 1;
-            var seek = pc;
-
-            while (bracket_nesting >= 1 and seek <= prog.len) {
-                seek += 1;
-
-                if (prog[seek] == ']') {
-                    bracket_nesting -= 1;
-                }
-                else if (prog[seek] == '[') {
-                    bracket_nesting += 1;
-                }
-            }
-
-            if (bracket_nesting <= 0) {
-                table[pc] = seek;
-                table[seek] = pc;
-            }
-            else {
-                std.log.warn("unmatched [ at pc = {}", .{pc});
-            }
+            try loop_stack.append(ops.items.len);
+            try ops.append(.{ .op = .jmp, .arg = 0 });
+            pc += 1;
         }
+        else if (prog[pc] == ']') {
+            if (loop_stack.items.len == 0) {
+                std.log.warn("unmatched [ at pc = {}", .{pc});
+                return error.UnmatchedLoop;
+            }
 
-        pc += 1;
+            var brac_offset = loop_stack.pop();
+
+            ops.items[brac_offset].arg = ops.items.len;
+            try ops.append(.{ .op = .jnz, .arg = brac_offset });
+            pc += 1;
+        }
+        else {
+            const begin = pc;
+            pc += 1;
+            while (pc < prog.len and prog[pc] == prog[pc - 1]) {
+                pc += 1;
+            }
+
+            const num_repeats = pc - begin;
+            const optype: OperatorType = switch (prog[begin]) {
+                '>' => .rshift,
+                '<' => .lshift,
+                '+' => .inc,
+                '-' => .dec,
+                '.' => .write,
+                ',' => .read,
+                else => .invalid
+            };
+            if(optype != .invalid)
+                try ops.append(.{ .op = optype, .arg = num_repeats });
+        }
     }
+
+    return ops;
 }
 
 pub fn main() !void {
@@ -57,35 +73,38 @@ pub fn main() !void {
     const stdin = std.io.getStdIn().reader();
     const stdout = std.io.getStdOut().writer();
 
-    // Jump table
-    var jump_table = try allocator.alloc(u32, prog.len);
-    defer allocator.free(jump_table);
-    std.mem.set(u32, jump_table, 0);
+    // Compile
+    var ops = try compile_prog(allocator, prog);
+    defer ops.deinit();
 
-    compute_jumps(jump_table, prog);
+    while (pc < ops.items.len): (pc += 1) {
+        var i = ops.items[pc];
+        var arg = @intCast(u32, i.arg);
 
-    // Interpreter
-    while (pc < prog.len) {
-        switch (prog[pc]) {
-            '>' => { ptr += 1; },
-            '<' => { ptr -= 1; },
-            '+' => { memory[ptr] +%= 1; },
-            '-' => { memory[ptr] -%= 1; },
-            '.' => { try stdout.writeByte(@intCast(u8, memory[ptr])); },
-            ',' => { memory[ptr] = try stdin.readByte(); },
-            '[' => {
+        switch (i.op) {
+            .inc => { memory[ptr] +%= arg; },
+            .dec => { memory[ptr] -%= arg; },
+            .rshift => { ptr += arg; },
+            .lshift => { ptr -= arg; },
+            .read => {
+                while (arg > 0): (arg -= 1) {
+                    memory[ptr] = try stdin.readByte();
+                }
+            },
+            .write => {
+                try stdout.writeByteNTimes(@truncate(u8, memory[ptr]), arg);
+            },
+            .jmp => {
                 if (memory[ptr] == 0) {
-                    pc = jump_table[pc];
+                    pc = arg;
                 }
             },
-            ']' => {
+            .jnz => {
                 if (memory[ptr] != 0) {
-                    pc = jump_table[pc];
+                    pc = arg;
                 }
             },
-            else => {},
+            else => {}
         }
-
-        pc += 1;
     }
 }
